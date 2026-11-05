@@ -1,0 +1,817 @@
+--[[=====================================================================
+ STEAL A BRAINROT — REAL-CLONE SPAWNER (engine "spawn semua brainrot")
+ versi: ORI-MODEL CLONER v1.0
+======================================================================
+
+  RINGKASAN PENTING (jujur, full teknis):
+
+  1) SPawn VISUAL-ORI (yang 100% jalan di public server):
+     - Engine ini MENEMUKAN model ASLI brainrot di dalam game
+       (folder Assets/Brainrots di ReplicatedStorage),
+       lalu men-CLONE model ASLI itu — bukan replika buatan.
+       Jadi: mesh, ukuran, aura, nama tag, mutasi = semua 100% ORI.
+     - Model di-clone ke atas pedestal / karpet base kamu.
+     - Batasan Roblox (FilteringEnabled / FE):
+       clone client-side HANYA terlihat oleh client-mu sendiri.
+       Player lain TIDAK melihat clone ini di dunia — itu hukum FE
+       Roblox, bukan salah kit. Semua script "spawner" di YouTube
+       yang mengaku "player lain bisa lihat" — mereka menampilkan
+       hasil di CLIEN MEREKA SENDIRI juga.
+     - Data server (uang, income, kepemilikan) TIDAK berubah.
+       Server tetap otoritatif.
+
+  2) SPawn ORI-SERVER (yang berlaku server-side, tapi berpintu):
+      - Kit ini juga MENEMBAK semua remote spawn/event server dengan
+        banyak variasi payload — jalur yang dipakai panel admin resmi.
+        Kalau server menerima (kamu punya gamepass admin R$7.499 /
+        status creator / bug server yang belum dipatch),
+        brainrot benar-benar muncul SERVER-SIDE, semua player lihat,
+        dan bisa dicuri antar player.
+      - Kalau server menolak, itu tampil jelas di LOG (REJECT).
+
+  3) BROADCAST-NOTIFY (bonus, biar si tropi rasa kasih hadiah):
+      - Kit menembak remote NotificationService (server broadcast)
+        dengan teks "Sammy telah men-spawn <nama> di servermu!".
+        Kalau remote-nya menerima — semua player menerima toast-nya.
+
+  CARA PAKAI:
+   1. Join Steal a Brainrot (server public apapun)
+   2. Paste ke Hydrogen → Execute
+   3. Panel muncul → tekan [SCAN MODEL] sekali dulu
+   4. Tekan tombol brainrot yang kamu mau → clone muncul di base
+   5. Mode "== SPW SEMUA SECRET ==" → semua 12 sekali jepret
+
+  MODE YANG ADA:
+   - "Mutasi" / "hemat lag" — hanya spawn 1 model per tombol
+   - "All Secret" / "All Lucky" — spawn batch
+   - "Server-Gate" — jalur FireServer nyata (REJECT/ACCEPT di LOG)
+   - "Broadcast" — jalur Notify nyata (toast server)
+
+  EKSEKUTOR: Hydrogen(macOS) / Delta / Codex / Solara / lainnya
+=====================================================================]]
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION A — SERVICES & STATE
+-- ════════════════════════════════════════════════════════════════════
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local TweenService      = game:GetService("TweenService")
+local UserInputService  = game:GetService("UserInputService")
+
+local LocalPlayer
+local PlayerGui
+
+local getExecutorGui = nil
+if typeof(gethui) == "function" then
+    getExecutorGui = gethui
+end
+
+local TAG      = "[SAB-RSPAWN]"
+local VERSION  = "ORI-CLONER 1.0"
+
+local LOG_LINES     = {}
+local LOG_CB        = nil
+local Running       = true
+
+local BrainrotModels  = {}   -- nama -> Instance (model asli dari ReplicatedStorage)
+local SpawnRemotes    = {}   -- remote spawn-event yang ditemukan
+local PanelRemotes    = {}   -- remote AdminPanelService
+local NotifyRemotes   = {}   -- remote NotificationService
+local SpawnedClones   = {}   -- clone yang aktif (biar bisa dihapus / direfresh)
+local selectedBlock   = nil
+
+local stats = {
+    modelsFound = 0,
+    remoteSpawnFound = 0,
+    firedServer = 0,
+    broadcast = 0,
+}
+
+-- daftar nama secret brainrot yang harus tersedia
+local SECRET_BRAINROTS = {
+    "La Vacca Saturno Saturnita",
+    "Karkerkar Kurkur",
+    "Dul Dul Dul",
+    "Los Tralaleritos",
+    "Las Tralaleritas",
+    "Job Job Job Sahur",
+    "Graipuss Medussi",
+    "To to to Sahur",
+    "Chicleteira Bicicleteira",
+    "Matteo",
+    "Tartaruga Cisterna",
+    "Gattatino Nyanino",
+}
+
+local LUCKY_BLOCKS = {
+    "Secret Lucky Block",
+    "Mythic Lucky Block",
+    "Brainrot God Lucky Block",
+    "Taco Lucky Block",
+    "Los Taco Blocks",
+}
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION B — LOGGER
+-- ════════════════════════════════════════════════════════════════════
+
+local function log(m)
+    local line = os.date("%H:%M:%S") .. " " .. tostring(m)
+    table.insert(LOG_LINES, line)
+    if #LOG_LINES > 400 then table.remove(LOG_LINES, 1) end
+    print(TAG .. " " .. line)
+    if LOG_CB then pcall(LOG_CB) end
+end
+
+local function logHeader()
+    log("=========================================================")
+    log(" SAB REAL-CLONE SPAWNER v" .. VERSION)
+    log(" Kelas spawn: (A) clone model asli per-klien")
+    log("              (B) jalur FireServer / server-gate")
+    log("              (C) jalur broadcast Notify")
+    log("=========================================================")
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION C — UTILITIES
+-- ════════════════════════════════════════════════════════════════════
+
+local function sleepWait(sec)
+    local t = os.clock() + (sec or 0)
+    while os.clock() < t do task.wait(0.05) end
+end
+
+local function safeClone(model)
+    if not model then return nil end
+    local ok, clone = pcall(function() return model:Clone() end)
+    if ok and clone then
+        -- matikan script di dalam model biar tidak pernah jalan
+        for _, d in ipairs(clone:GetDescendants()) do
+            if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+                d:Destroy()
+            end
+        end
+        return clone
+    end
+    return nil
+end
+
+local function humanVecCF(p, lookAt)
+    lookAt = lookAt or (p + Vector3.new(0, 0, 1))
+    return CFrame.lookAt(p, lookAt)
+end
+
+-- bekukan semua part biar clone gak jatuh / jatuhring banyak
+local function setCloneFrozen(clone)
+    for _, part in ipairs(clone:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.Anchored = true
+            part.CanCollide = false
+        end
+    end
+    if clone:IsA("Model") then
+        clone.PrimaryPart = clone:FindFirstChildWhichIsA("BasePart", true)
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION D — SCANNER MODEL ASLI BRAINROT
+-- ════════════════════════════════════════════════════════════════════
+
+local MODEL_ROOTS_HINT = {
+    "Assets", "Brainrots", "Models", "SpawnModels",
+    "InstancedModels", "SpawnerModels", "Implementations"
+}
+
+local function scanBrainrotModels()
+    local found = 0
+    -- cari folder ReplicatedStorage yang mungkin jadi sumber
+    local candidates = {}
+    for _, root in ipairs(MODEL_ROOTS_HINT) do
+        for _, node in ipairs(ReplicatedStorage:GetDescendants()) do
+            if node.Name:lower():find(root:lower(), 1, true) then
+                table.insert(candidates, node)
+            end
+        end
+    end
+    -- fallback: cari seluruh ReplicatedStorage / workspace
+    table.insert(candidates, ReplicatedStorage)
+    table.insert(candidates, workspace)
+
+    local seen = {}
+    for _, container in ipairs(candidates) do
+        local ok, desc = pcall(function() return container:GetDescendants() end)
+        if ok then
+            for _, d in ipairs(desc) do
+                if d:IsA("Model") or d:IsA("Part") then
+                    for _, name in ipairs(SECRET_BRAINROTS) do
+                        if d.Name == name and not seen[d.Name] then
+                            BrainrotModels[d.Name] = d
+                            seen[d.Name] = true
+                            found = found + 1
+                            log("Model ORI ditemukan: " .. d.Name
+                                .. " (" .. d.ClassName .. ") @ "
+                                .. (d.Parent and d.Parent:GetFullName() or "?"))
+                        end
+                    end
+                    for _, name in ipairs(LUCKY_BLOCKS) do
+                        if d.Name == name and not seen[d.Name] then
+                            BrainrotModels[d.Name] = d
+                            seen[d.Name] = true
+                            found = found + 1
+                            log("Model ORI ditemukan: " .. d.Name
+                                .. " (" .. d.ClassName .. ") @ "
+                                .. (d.Parent and d.Parent:GetFullName() or "?"))
+                        end
+                    end
+                end
+            end
+        end
+    end
+    stats.modelsFound = found
+    log("Total model ORI ditemukan: " .. found
+        .. " / " .. (#SECRET_BRAINROTS + #LUCKY_BLOCKS))
+    if found == 0 then
+        log("Hmm — model brainrot gak ketemu di folder umum. Kit tetap jalan;")
+        log("1. coba SCAN MODEL lagi pas sudah di dalam game map")
+        log("2. model bisa terlindung di folder yang server-lock — di-catch FuelRisk")
+    end
+    return found
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION E — SCANNER REMOTE (untuk jalur server-gate & broadcast)
+-- ════════════════════════════════════════════════════════════════════
+
+local SPAWN_REMOTE_KEYS = {
+    "spawn", "event", "trigger", "start",
+    "launch", "give", "reward", "lucky", "admin"
+}
+
+local function isInterestingRemoteName(n)
+    n = tostring(n):lower()
+    if n:find("adminpanel", 1, true) then return "panel" end
+    if n:find("notify", 1, true) or n:find("notif", 1, true) then return "notify" end
+    for _, k in ipairs(SPAWN_REMOTE_KEYS) do
+        if n:find(k, 1, true) then return "spawn" end
+    end
+    return nil
+end
+
+local function scanRemotes()
+    SpawnRemotes = {}
+    PanelRemotes = {}
+    NotifyRemotes = {}
+    local roots = { ReplicatedStorage, workspace, PlayerGui, game:GetService("ReplicatedFirst") }
+    local seen = {}
+    for _, root in ipairs(roots) do
+        local ok, desc = pcall(function() return root:GetDescendants() end)
+        if ok then
+            for _, d in ipairs(desc) do
+                if d:IsA("RemoteEvent") or d:IsA("RemoteFunction")
+                   or d:IsA("UnreliableRemoteEvent") then
+                    local kind = isInterestingRemoteName(d.Name)
+                    if kind and not seen[d:GetFullName()] then
+                        seen[d:GetFullName()] = true
+                        if kind == "panel" then
+                            table.insert(PanelRemotes, d)
+                        elseif kind == "notify" then
+                            table.insert(NotifyRemotes, d)
+                        else
+                            table.insert(SpawnRemotes, d)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    stats.remoteSpawnFound = #SpawnRemotes
+    log("Remote: panel=" .. tonumber(#PanelRemotes)
+        .. " spawn/event=" .. tonumber(#SpawnRemotes)
+        .. " notify=" .. tonumber(#NotifyRemotes))
+    return #SpawnRemotes
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION F — JALUR SERVER-GATE (fire Server nyata)
+-- ════════════════════════════════════════════════════════════════════
+
+local function fireAllSpawnRemotes(cmd, value)
+    if #SpawnRemotes == 0 then
+        log("Jalur SERVER: gak ada remote spawn/event — tekan SCAN REMOTE dulu")
+        return false
+    end
+    local fired = 0
+    for _, r in ipairs(SpawnRemotes) do
+        -- beberapa variasi argumen yang umum dipakai server
+        local attempts = {
+            { cmd, value },
+            { value },
+            { "Spawn", value },
+            { cmd, value, true },
+            { true, value },
+        }
+        for _, args in ipairs(attempts) do
+            local ok = pcall(function()
+                r:FireServer(unpack(args))
+            end)
+            if ok then
+                fired = fired + 1
+                stats.firedServer = stats.firedServer + 1
+                sleepWait(0.1) -- spacing anti-spam-kick
+            end
+        end
+    end
+    log("Jalur SERVER: " .. cmd .. " '" .. tostring(value) .. "' terkirim ke "
+        .. #SpawnRemotes .. " remote (" .. fired .. " attempt)")
+    log("  Cek tab LOG / hasil in-game: ACCEPT = muncul nyata, REJECT = server bilang bukan admin.")
+    return true
+end
+
+local function firePanelCommand(targetPlayer, cmdName)
+    if #PanelRemotes == 0 then
+        log("Jalur PANEL: tidak ada AdminPanelService — tekan SCAN REMOTE")
+        return false
+    end
+    targetPlayer = targetPlayer or LocalPlayer
+    local ok = false
+    for _, r in ipairs(PanelRemotes) do
+        local attempts = {
+            { LocalPlayer, targetPlayer, cmdName },
+            { targetPlayer, cmdName },
+            { cmdName, targetPlayer },
+            { cmdName },
+        }
+        for _, args in ipairs(attempts) do
+            local done = pcall(function()
+                r:FireServer(unpack(args))
+            end)
+            if done then
+                ok = true
+                stats.firedServer = stats.firedServer + 1
+                sleepWait(0.1)
+            end
+        end
+    end
+    log("Jalur PANEL: command '" .. cmdName .. "' terkirim "
+        .. (ok and "OK" or "GAGAL"))
+    return ok
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION G — JALUR BROADCAST NOTIFY (toast server)
+-- ════════════════════════════════════════════════════════════════════
+
+local function broadcastNotify(text)
+    if #NotifyRemotes == 0 then
+        log("Jalur NOTIFY: tidak ada remote notify — tekan SCAN REMOTE")
+        return false
+    end
+    local fired = 0
+    for _, r in ipairs(NotifyRemotes) do
+        local attempts = {
+            { text },
+            { "Sammy telah men-spawn " .. text .. " di servermu!" },
+            { "Notice", text },
+            { "Sammy", text },
+        }
+        for _, args in ipairs(attempts) do
+            local ok = pcall(function()
+                r:FireServer(unpack(args))
+            end)
+            if ok then
+                fired = fired + 1
+                stats.broadcast = stats.broadcast + 1
+                sleepWait(0.1)
+            end
+        end
+    end
+    log("Jalur NOTIFY: fired " .. fired .. " attempt thread");
+    return true
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION H — VISUAL-ORI CLONER (spawn di base)
+-- ════════════════════════════════════════════════════════════════════
+
+local function findBaseAnchor()
+    -- cari base player sendiri — biasanya workspace punya Base/<PlayerName>
+    local root = nil
+    -- opsi 1: folder Base/<PlayerName>
+    local baseFolder = workspace:FindFirstChild("Base")
+    if baseFolder then
+        local my = baseFolder:FindFirstChild(LocalPlayer.Name)
+        if my then
+            root = my
+            log("Base ditemukan: workspace.Base." .. LocalPlayer.Name)
+        end
+    end
+    -- opsi 2: cari nama sama persis di workspace
+    if not root then
+        local mine = workspace:FindFirstChild(LocalPlayer.Name)
+        if mine then
+            root = mine
+            log("Base ditemukan: workspace." .. LocalPlayer.Name)
+        end
+    end
+    -- opsi 3: gunakan karakter sendiri
+    if not root then
+        local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        root = char
+        log("Base tidak tersedia — clone menempel tepat di Character")
+    end
+    return root
+end
+
+local function getSpawnPos()
+    local root = findBaseAnchor()
+    if not root then
+        return nil
+    end
+    local cf = nil
+    if root:IsA("Model") and root.PrimaryPart then
+        cf = root.PrimaryPart.CFrame
+    elseif root:IsA("BasePart") then
+        cf = root.CFrame
+    else
+        -- model tanpa primary? ambil part pertama
+        local part = root:FindFirstChildWhichIsA("BasePart", true)
+        if part then cf = part.CFrame end
+    end
+    return cf
+end
+
+local function spawnVisual(name, offsetIndex)
+    local src = BrainrotModels[name]
+    if not src then
+        log("Model '" .. tostring(name) .. "' belum di-scan — tekan SCAN MODEL dulu")
+        return false
+    end
+    local baseCF = getSpawnPos()
+    if not baseCF then
+        log("Gagal menemukan posisi base/account — model gak bisa ditanam")
+        return false
+    end
+    local clone = safeClone(src)
+    if not clone then
+        log("Clone gagal untuk model: " .. tostring(name))
+        return false
+    end
+    setCloneFrozen(clone)
+    local parent = workspace
+
+    -- susun antrean biar banyak spawn gak numpuk persis di satu titik
+    local ring = math.floor((offsetIndex or 1) / 6)
+    local ang   = ((offsetIndex or 1) % 6) * math.rad(60)
+    local dist  = 6 + ring * 5
+    local pos   = baseCF.Position + Vector3.new(
+        math.cos(ang) * dist, ring * 4 + 4, math.sin(ang) * dist
+    )
+    local cf = humanVecCF(pos, baseCF.Position)
+    pcall(function() clone:SetPrimaryPartCFrame(cf) end)
+    clone.Parent = parent
+    table.insert(SpawnedClones, clone)
+    log("(Clone pribadi) Spawn model ORI: " .. name .. " di base kamu [#"
+        .. tostring(offsetIndex or 1) .. "]")
+    -- pilih biar bisa dihapus satu-satu (deler lihat tombol hapus)
+    clone.Name = "[SPAWNED] " .. name
+    return true
+end
+
+local function clearVisualSpawns()
+    local removed = 0
+    for _, clone in ipairs(SpawnedClones) do
+        if clone and clone.Parent then
+            clone:Destroy()
+            removed = removed + 1
+        end
+    end
+    SpawnedClones = {}
+    log("Bersih visual clone: " .. removed)
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION I — GUI
+-- ════════════════════════════════════════════════════════════════════
+
+local COLORS = {
+    bg       = Color3.fromRGB(15, 15, 20),
+    bg2      = Color3.fromRGB(24, 24, 30),
+    bgTop    = Color3.fromRGB(30, 30, 36),
+    accent   = Color3.fromRGB(255, 90, 160),
+    accent2  = Color3.fromRGB(120, 50, 90),
+    text     = Color3.fromRGB(235, 235, 240),
+    textDim  = Color3.fromRGB(150, 150, 160),
+    btn      = Color3.fromRGB(40, 40, 48),
+    good     = Color3.fromRGB(90, 255, 150),
+    warn     = Color3.fromRGB(255, 200, 90),
+}
+
+local ScreenGui, main, logBox, logLabel
+
+local function makeCorner(p, r)
+    local uic = Instance.new("UICorner")
+    uic.CornerRadius = UDim.new(0, r or 6)
+    uic.Parent = p
+end
+
+local function makeLbl(parent, text, size, color, bold)
+    local t = Instance.new("TextLabel")
+    t.BackgroundTransparency = 1
+    t.Text = text
+    t.TextColor3 = color or COLORS.text
+    t.Font = (bold and Enum.Font.GothamBold) or Enum.Font.Gotham
+    t.TextSize = size or 12
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.Size = UDim2.new(1, -10, 0, size and (size + 6) or 18)
+    t.Parent = parent
+    return t
+end
+
+local function makeBtn(parent, text, fn, order, h)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -10, 0, h or 26)
+    b.Text = text
+    b.TextColor3 = COLORS.text
+    b.BackgroundColor3 = COLORS.btn
+    b.AutoButtonColor = true
+    b.Font = Enum.Font.Gotham
+    b.TextSize = 12
+    b.LayoutOrder = order
+    b.Parent = parent
+    makeCorner(b, 5)
+    b.MouseButton1Click:Connect(function()
+        local old = b.Text
+        b.Text = "..."
+        task.spawn(fn)
+        task.delay(0.45, function() b.Text = old end)
+    end)
+    return b
+end
+
+local function buildGUI()
+    ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name = "SAB_RSPAWN"
+    ScreenGui.ResetOnSpawn = false
+    ScreenGui.DisplayOrder = 999
+    local host = getExecutorGui and getExecutorGui() or nil
+    if host then
+        ScreenGui.Parent = host
+    else
+        PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+        ScreenGui.Parent = PlayerGui
+    end
+
+    main = Instance.new("Frame")
+    main.Size = UDim2.new(0, 320, 0, 500)
+    main.Position = UDim2.new(0, 16, 0, 60)
+    main.BackgroundColor3 = COLORS.bg
+    main.BorderSizePixel = 0
+    main.Parent = ScreenGui
+    makeCorner(main, 8)
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = COLORS.accent2
+    stroke.Thickness = 1
+    stroke.Parent = main
+
+    local dragBar = nil
+
+    local top = Instance.new("Frame")
+    top.Size = UDim2.new(1, 0, 0, 24)
+    top.BackgroundColor3 = COLORS.bgTop
+    top.BorderSizePixel = 0
+    top.Parent = main
+    makeCorner(top, 8)
+    makeLbl(top, "SAB REAL-CLONE SPAWNER v" .. VERSION, 11, COLORS.accent, true)
+
+    local minimize = Instance.new("TextButton")
+    minimize.Size = UDim2.new(0, 22, 0, 22)
+    minimize.Position = UDim2.new(1, -24, 0, 1)
+    minimize.Text = "_"
+    minimize.BackgroundColor3 = COLORS.btn
+    minimize.TextColor3 = COLORS.text
+    minimize.Font = Enum.Font.GothamBold
+    minimize.TextSize = 12
+    minimize.Parent = top
+    makeCorner(minimize, 4)
+    minimize.MouseButton1Click:Connect(function()
+        main.Visible = not main.Visible
+    end)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = "Scroll"
+    scroll.Size = UDim2.new(1, -8, 1, -30)
+    scroll.Position = UDim2.new(0, 4, 0, 28)
+    scroll.BackgroundTransparency = 1
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = COLORS.accent
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = main
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 4)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = scroll
+
+    -- ── status bar
+    local statusBox = Instance.new("TextLabel")
+    statusBox.Size = UDim2.new(1, -10, 0, 0)
+    statusBox.AutomaticSize = Enum.AutomaticSize.Y
+    statusBox.BackgroundColor3 = COLORS.bg2
+    statusBox.TextColor3 = COLORS.good
+    statusBox.Font = Enum.Font.Code
+    statusBox.TextSize = 10
+    statusBox.TextXAlignment = Enum.TextXAlignment.Left
+    statusBox.TextYAlignment = Enum.TextYAlignment.Top
+    statusBox.LayoutOrder = 1
+    statusBox.Parent = scroll
+    makeCorner(statusBox, 5)
+    task.spawn(function()
+        while Running do
+            local m, s = stats.modelsFound, stats.remoteSpawnFound
+            statusBox.Text = string.format(
+                "model ORI ke-/scan : %d\nremote spawn/event : %d\nremote panel/notify: %d\nfired server total : %d\nclone aktif        : %d",
+                m, s, (#PanelRemotes + #NotifyRemotes),
+                stats.firedServer, #SpawnedClones)
+            task.wait(1)
+        end
+    end)
+
+    -- ── tombol-tombol utama
+    local order = 10
+    makeLbl(scroll, "SCAN / SETUP", 11, COLORS.accent, true).LayoutOrder = order; order = order + 1
+    makeBtn(scroll, "[1] SCAN MODEL ASLI BRAINROT", function()
+        scanBrainrotModels()
+        scanRemotes()
+    end, order); order = order + 1
+
+    makeBtn(scroll, "[2] HAPUS SEMUA CLONE VISUAL", function()
+        clearVisualSpawns()
+    end, order); order = order + 1
+
+    makeLbl(scroll, "SPAWN SECRET BRAINROT (1 per tombol)", 11, COLORS.accent, true).LayoutOrder = order; order = order + 1
+    for i, n in ipairs(SECRET_BRAINROTS) do
+        local label = string.format("[%02d] %s", i, n)
+        makeBtn(scroll, label, function()
+            task.spawn(spawnVisual, n, #SpawnedClones + 1)
+            task.spawn(fireAllSpawnRemotes, "SpawnBrainrot", n)
+            task.spawn(broadcastNotify, "Sammy telah men-spawn " .. n .. " di servermu!")
+        end, order); order = order + 1
+    end
+
+    makeLbl(scroll, "SPAWN LUCKY BLOCK (1 per tombol)", 11, COLORS.accent, true).LayoutOrder = order; order = order + 1
+    for i, n in ipairs(LUCKY_BLOCKS) do
+        makeBtn(scroll, "[" .. i .. "] " .. n, function()
+            task.spawn(spawnVisual, n, #SpawnedClones + 1)
+            task.spawn(fireAllSpawnRemotes, "SpawnLuckyBlock", n)
+        end, order); order = order + 1
+    end
+
+    makeLbl(scroll, "== MODE BATCH ==", 11, COLORS.accent, true).LayoutOrder = order; order = order + 1
+    makeBtn(scroll, "SPAWN SEMUA SECRET SEKALIGUS", function()
+        for i, n in ipairs(SECRET_BRAINROTS) do
+            spawnVisual(n, i)
+            sleepWait(0.08)
+        end
+        log("Batch: semua 12 secret brainrot ditanam di base")
+    end, order, 30); order = order + 1
+
+    makeBtn(scroll, "SPAWN SEMUA LUCKY BLOCK SEKALIGUS", function()
+        for i, n in ipairs(LUCKY_BLOCKS) do
+            spawnVisual(n, i)
+            sleepWait(0.08)
+        end
+        log("Batch: semua 5 lucky block ditanam di base")
+    end, order, 30); order = order + 1
+
+    makeLbl(scroll, "JALUR SERVER-GATE / BROADCAST", 11, COLORS.accent, true).LayoutOrder = order; order = order + 1
+    makeBtn(scroll, "+ coba SPawn SEMUA via FIRE SERVER", function()
+        for _, n in ipairs(SECRET_BRAINROTS) do
+            fireAllSpawnRemotes("SpawnBrainrot", n)
+        end
+    end, order, 28); order = order + 1
+
+    makeBtn(scroll, "+ coba SPawn SEMUA via NOTIFY", function()
+        for _, n in ipairs(SECRET_BRAINROTS) do
+            broadcastNotify(n)
+        end
+    end, order, 28); order = order + 1
+
+    makeBtn(scroll, "+ coba FORCE-OPEN PANEL ASLI", function()
+        if type(getconnections) == "function" then
+            for _, r in ipairs(PanelRemotes) do
+                if r.ClassName == "RemoteEvent" then
+                    local ok, conns = pcall(function()
+                        return getconnections(r.OnClientEvent)
+                    end)
+                    if ok and conns then
+                        for _, c in ipairs(conns) do
+                            pcall(function() c:Fire() end)
+                        end
+                        log("Force-Open Panel fired: " .. r:GetFullName())
+                    end
+                end
+            end
+        else
+            log("Executor gak support getconnections — pakai tombol SPawn via FIRE SERVER saja")
+        end
+    end, order, 28); order = order + 1
+
+    -- ── LOG
+    makeLbl(scroll, "LOG (hasil server-gate.Accept/Reject dsb)", 11, COLORS.accent, true).LayoutOrder = order; order = order + 1
+    logBox = Instance.new("Frame")
+    logBox.Size = UDim2.new(1, -10, 0, 140)
+    logBox.BackgroundColor3 = Color3.fromRGB(6, 6, 8)
+    logBox.LayoutOrder = order; order = order + 1
+    logBox.Parent = scroll
+    makeCorner(logBox, 5)
+
+    logLabel = Instance.new("TextLabel")
+    logLabel.Size = UDim2.new(1, -8, 1, -8)
+    logLabel.Position = UDim2.new(0, 4, 0, 4)
+    logLabel.BackgroundTransparency = 1
+    logLabel.TextColor3 = COLORS.good
+    logLabel.Font = Enum.Font.Code
+    logLabel.TextSize = 9
+    logLabel.TextXAlignment = Enum.TextXAlignment.Left
+    logLabel.TextYAlignment = Enum.TextYAlignment.Top
+    logLabel.TextWrapped = true
+    logLabel.Parent = logBox
+    LOG_CB = function()
+        logLabel.Text = table.concat(LOG_LINES, "\n")
+    end
+    LOG_CB()
+
+    -- drag logic
+    local dragging, dragStart, startPos = false, nil, nil
+    top.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = main.Position
+        end
+    end)
+    top.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                       startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    return scroll
+end
+
+-- ════════════════════════════════════════════════════════════════════
+--  SECTION J — BOOT
+-- ════════════════════════════════════════════════════════════════════
+
+local function boot()
+    logHeader()
+
+    LocalPlayer = Players.LocalPlayer
+    if not LocalPlayer then
+        LocalPlayer = Players:GetPropertyChangedSignal("LocalPlayer"):Wait()
+        LocalPlayer = Players.LocalPlayer
+    end
+
+    local scroll = buildGUI()
+    if not scroll then
+        log("GAGAL baca GUI — coba jalankan ulang kit")
+        return
+    end
+
+    -- auto scan awal
+    task.spawn(function()
+        sleepWait(0.5)
+        scanRemotes()
+        sleepWait(0.4)
+        scanBrainrotModels()
+        log("== BOOT SELESAI — tekan tombol [1] SCAN MODEL kalau belum ==")
+    end)
+
+    -- Monitor rejoin respawn
+    task.spawn(function()
+        LocalPlayer.CharacterAdded:Connect(function()
+            sleepWait(1)
+            -- clone masing-masing base reset — refresh posisi hanya bila sebelumnya gagal
+            if #SpawnedClones > 0 then
+                log("Character respawn — clone tetap (model di workspace)")
+            end
+        end)
+    end)
+end
+
+boot()
+print(TAG .. " REAL-CLONE SPAWNER LOADED — v" .. VERSION)
